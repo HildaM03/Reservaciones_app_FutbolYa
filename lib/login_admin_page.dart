@@ -78,25 +78,45 @@ class _LoginAdminPageState extends State<LoginAdminPage> {
     setState(() => _isLoading = true);
 
     try {
-      final adminQuery = await _firestore
-          .collection('administradores')
-          .where('correo', isEqualTo: _emailController.text.trim())
-          .limit(1)
-          .get();
-
-      if (adminQuery.docs.isEmpty) {
-        throw FirebaseAuthException(
-          code: 'not-admin',
-          message: 'No tienes permisos de administrador',
-        );
-      }
-
+      // 1. Primero intentar iniciar sesión en Firebase Auth
       final userCredential = await _auth.signInWithEmailAndPassword(
         email: _emailController.text.trim(),
         password: _passwordController.text.trim(),
       );
 
+      // 2. Verificar si el email está verificado (opcional, puedes comentar temporalmente para desarrollo)
+      if (!userCredential.user!.emailVerified) {
+        await _auth.signOut();
+        throw FirebaseAuthException(
+          code: 'email-not-verified',
+          message: 'Por favor verifica tu correo electrónico antes de iniciar sesión',
+        );
+      }
+
+      // 3. Buscar en Firestore usando el campo 'email' (CORREGIDO: antes era 'correo')
+      final adminQuery = await _firestore
+          .collection('administradores')
+          .where('email', isEqualTo: _emailController.text.trim()) // CAMBIO CLAVE AQUÍ
+          .limit(1)
+          .get();
+
+      // Debug: Verificar qué se encontró
+      print('Documentos encontrados: ${adminQuery.docs.length}');
+      if (adminQuery.docs.isNotEmpty) {
+        print('Datos del documento: ${adminQuery.docs.first.data()}');
+      }
+
+      if (adminQuery.docs.isEmpty) {
+        await _auth.signOut();
+        throw FirebaseAuthException(
+          code: 'not-admin',
+          message: 'No tienes permisos de administrador. Regístrate primero.',
+        );
+      }
+
       final adminDoc = adminQuery.docs.first;
+      
+      // 4. Verificar que el UID coincide
       if (adminDoc['uid'] != userCredential.user!.uid) {
         await _auth.signOut();
         throw FirebaseAuthException(
@@ -105,7 +125,9 @@ class _LoginAdminPageState extends State<LoginAdminPage> {
         );
       }
 
-      if (adminDoc['rol']?.toString().toLowerCase() != 'admin') {
+      // 5. Verificar rol (convertir a minúsculas para evitar errores)
+      final rol = adminDoc['rol']?.toString().toLowerCase() ?? '';
+      if (rol != 'admin') {
         await _auth.signOut();
         throw FirebaseAuthException(
           code: 'invalid-role',
@@ -113,8 +135,10 @@ class _LoginAdminPageState extends State<LoginAdminPage> {
         );
       }
 
+      // 6. Guardar credenciales si "Recordarme" está activado
       await _saveCredentials();
 
+      // 7. Navegar a la pantalla principal
       if (mounted) {
         Navigator.pushAndRemoveUntil(
           context,
@@ -128,10 +152,12 @@ class _LoginAdminPageState extends State<LoginAdminPage> {
       }
 
       _showSnackBar('✅ Sesión de administrador iniciada correctamente', AppColors.azulElectrico);
+      
     } on FirebaseAuthException catch (e) {
       _handleLoginError(e);
     } catch (e) {
-      _showSnackBar('Error inesperado: $e', AppColors.naranjaFuerte);
+      print('Error inesperado: $e');
+      _showSnackBar('Error inesperado. Intente nuevamente', AppColors.naranjaFuerte);
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -145,7 +171,7 @@ class _LoginAdminPageState extends State<LoginAdminPage> {
 
     try {
       await _auth.sendPasswordResetEmail(email: _emailController.text.trim());
-      _showSnackBar('Correo de recuperación enviado', AppColors.azulElectrico);
+      _showSnackBar('✅ Correo de recuperación enviado. Revise su bandeja', AppColors.azulElectrico);
     } on FirebaseAuthException catch (e) {
       _showSnackBar('Error: ${e.message}', AppColors.naranjaFuerte);
     }
@@ -168,7 +194,7 @@ class _LoginAdminPageState extends State<LoginAdminPage> {
     String errorMessage;
     switch (e.code) {
       case 'user-not-found':
-        errorMessage = 'Usuario no encontrado';
+        errorMessage = 'Usuario no encontrado. Regístrese primero.';
         break;
       case 'wrong-password':
         errorMessage = 'Contraseña incorrecta';
@@ -177,10 +203,10 @@ class _LoginAdminPageState extends State<LoginAdminPage> {
         errorMessage = 'Correo electrónico inválido';
         break;
       case 'user-disabled':
-        errorMessage = 'Usuario deshabilitado';
+        errorMessage = 'Usuario deshabilitado. Contacte al soporte.';
         break;
       case 'not-admin':
-        errorMessage = 'No tienes permisos de administrador';
+        errorMessage = 'No tienes permisos de administrador. Regístrese primero.';
         break;
       case 'invalid-role':
         errorMessage = 'No tienes el rol de administrador';
@@ -194,18 +220,37 @@ class _LoginAdminPageState extends State<LoginAdminPage> {
       case 'network-request-failed':
         errorMessage = 'Error de conexión. Verifique su internet';
         break;
+      case 'email-not-verified':
+        errorMessage = 'Por favor verifica tu correo electrónico antes de iniciar sesión';
+        break;
+      case 'operation-not-allowed':
+        errorMessage = 'El inicio de sesión con email/contraseña no está habilitado. Contacte al administrador.';
+        break;
       default:
-        errorMessage = 'Error al iniciar sesión: ${e.message}';
+        errorMessage = 'Error al iniciar sesión: ${e.message ?? "Error desconocido"}';
     }
     _showSnackBar(errorMessage, AppColors.naranjaFuerte);
+  }
+
+  Future<void> _resendVerificationEmail() async {
+    try {
+      final user = _auth.currentUser;
+      if (user != null) {
+        await user.sendEmailVerification();
+        _showSnackBar('✅ Correo de verificación reenviado', AppColors.azulElectrico);
+      }
+    } catch (e) {
+      _showSnackBar('Error al reenviar verificación: $e', AppColors.naranjaFuerte);
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Administracion Futbol Pasión'),
+        title: const Text('Administración Fútbol Pasión'),
         backgroundColor: AppColors.azulElectrico,
+        centerTitle: true,
       ),
       body: Container(
         color: AppColors.grisClaro,
@@ -216,7 +261,11 @@ class _LoginAdminPageState extends State<LoginAdminPage> {
             child: ListView(
               children: [
                 const SizedBox(height: 20),
-                Icon(Icons.admin_panel_settings, size: 80, color: AppColors.naranjaFuerte),
+                Icon(
+                  Icons.admin_panel_settings, 
+                  size: 100, 
+                  color: AppColors.azulElectrico
+                ),
                 const SizedBox(height: 20),
                 Text(
                   'Panel de Administración',
@@ -227,6 +276,15 @@ class _LoginAdminPageState extends State<LoginAdminPage> {
                   ),
                   textAlign: TextAlign.center,
                 ),
+                const SizedBox(height: 10),
+                Text(
+                  'Gestiona reservas y canchas',
+                  style: TextStyle(
+                    fontSize: 16,
+                    color: Colors.grey.shade600,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
                 const SizedBox(height: 30),
                 TextFormField(
                   controller: _emailController,
@@ -234,19 +292,23 @@ class _LoginAdminPageState extends State<LoginAdminPage> {
                   decoration: InputDecoration(
                     labelText: 'Correo electrónico',
                     labelStyle: TextStyle(color: AppColors.azulElectrico),
-                    prefixIcon: Icon(Icons.email, color: AppColors.naranjaFuerte),
+                    prefixIcon: Icon(Icons.email, color: AppColors.azulElectrico),
                     focusedBorder: OutlineInputBorder(
-                      borderSide: BorderSide(color: AppColors.naranjaFuerte, width: 2),
+                      borderSide: BorderSide(color: AppColors.azulElectrico, width: 2),
+                    ),
+                    enabledBorder: OutlineInputBorder(
+                      borderSide: BorderSide(color: Colors.grey.shade400),
                     ),
                     border: const OutlineInputBorder(),
                     filled: true,
                     fillColor: AppColors.blanco,
+                    hintText: 'ejemplo@admin.com',
                   ),
                   validator: (value) {
                     if (value == null || value.isEmpty) {
                       return 'Ingrese su correo';
                     }
-                    if (!value.contains('@')) {
+                    if (!RegExp(r'^[\w-\.]+@([\w-]+\.)+[\w-]{2,4}$').hasMatch(value)) {
                       return 'Correo inválido';
                     }
                     return null;
@@ -259,7 +321,7 @@ class _LoginAdminPageState extends State<LoginAdminPage> {
                   decoration: InputDecoration(
                     labelText: 'Contraseña',
                     labelStyle: TextStyle(color: AppColors.azulElectrico),
-                    prefixIcon: Icon(Icons.lock, color: AppColors.naranjaFuerte),
+                    prefixIcon: Icon(Icons.lock, color: AppColors.azulElectrico),
                     suffixIcon: IconButton(
                       icon: Icon(
                         _obscurePassword ? Icons.visibility_off : Icons.visibility,
@@ -268,7 +330,10 @@ class _LoginAdminPageState extends State<LoginAdminPage> {
                       onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
                     ),
                     focusedBorder: OutlineInputBorder(
-                      borderSide: BorderSide(color: AppColors.naranjaFuerte, width: 2),
+                      borderSide: BorderSide(color: AppColors.azulElectrico, width: 2),
+                    ),
+                    enabledBorder: OutlineInputBorder(
+                      borderSide: BorderSide(color: Colors.grey.shade400),
                     ),
                     border: const OutlineInputBorder(),
                     filled: true,
@@ -290,15 +355,18 @@ class _LoginAdminPageState extends State<LoginAdminPage> {
                     Checkbox(
                       value: _rememberMe,
                       onChanged: (value) => setState(() => _rememberMe = value ?? false),
-                      activeColor: AppColors.naranjaFuerte,
+                      activeColor: AppColors.azulElectrico,
                     ),
-                    const Text('Recordarme'),
+                    Text(
+                      'Recordarme',
+                      style: TextStyle(color: Colors.grey.shade700),
+                    ),
                     const Spacer(),
                     TextButton(
                       onPressed: _resetPassword,
                       child: Text(
                         '¿Olvidó su contraseña?',
-                        style: TextStyle(color: AppColors.naranjaFuerte),
+                        style: TextStyle(color: AppColors.azulElectrico),
                       ),
                     ),
                   ],
@@ -307,31 +375,66 @@ class _LoginAdminPageState extends State<LoginAdminPage> {
                 ElevatedButton(
                   onPressed: _isLoading ? null : _loginAdmin,
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: AppColors.azulElectrico, // fondo azul
-                    foregroundColor: Colors.white, // texto blanco
-                    padding: const EdgeInsets.symmetric(vertical: 15),
-                    textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                    backgroundColor: AppColors.azulElectrico,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                    textStyle: const TextStyle(
+                      fontSize: 16, 
+                      fontWeight: FontWeight.bold,
+                    ),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    elevation: 3,
                   ),
                   child: _isLoading
-                      ? const CircularProgressIndicator(color: Colors.white)
+                      ? const SizedBox(
+                          height: 20,
+                          width: 20,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.white,
+                          ),
+                        )
                       : const Text('INICIAR SESIÓN'),
                 ),
                 const SizedBox(height: 20),
                 Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    const Text("¿No tienes cuenta?"),
+                    Text(
+                      "¿No tienes cuenta?",
+                      style: TextStyle(color: Colors.grey.shade700),
+                    ),
+                    const SizedBox(width: 5),
                     TextButton(
                       onPressed: () => Navigator.pushReplacement(
                         context,
-                        MaterialPageRoute(builder: (context) => const RegisterAdminPage()),
+                        MaterialPageRoute(
+                          builder: (context) => const RegisterAdminPage(),
+                        ),
                       ),
                       child: Text(
                         'Regístrate',
-                        style: TextStyle(color: AppColors.naranjaFuerte),
+                        style: TextStyle(
+                          color: AppColors.azulElectrico,
+                          fontWeight: FontWeight.bold,
+                        ),
                       ),
                     ),
                   ],
+                ),
+                const SizedBox(height: 10),
+                // Botón para reenviar verificación (útil en desarrollo)
+                TextButton(
+                  onPressed: _resendVerificationEmail,
+                  child: Text(
+                    'Reenviar correo de verificación',
+                    style: TextStyle(
+                      color: Colors.grey.shade600,
+                      fontSize: 14,
+                    ),
+                  ),
                 ),
               ],
             ),
